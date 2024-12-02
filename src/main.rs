@@ -27,11 +27,11 @@ fn systemclock_config(dp: &pac::Peripherals) {
     let _pwren = dp.RCC.apb1enr().read().pwren();
 
     // __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2)
-    dp.PWR.cr().write(|w| unsafe { w.vos().bits(0b10) });
+    // dp.PWR.cr().write(|w| unsafe { w.vos().bits(0b10) });
+    // while !dp.PWR.csr().read().vosrdy().bit() {}
 
-    // It's probably turned on already
-    // dp.RCC.cr().write(|w| w.hsion().set_bit());
-    // while dp.RCC.cr().read().hsirdy().bit() {}
+    dp.RCC.cr().write(|w| w.hsion().set_bit());
+    while !dp.RCC.cr().read().hsirdy().bit() {}
 
     dp.RCC.cr().modify(|_, m| unsafe { m.hsitrim().bits(0b10) });
 
@@ -72,7 +72,6 @@ fn systemclock_config(dp: &pac::Peripherals) {
     });
 
     dp.RCC.cr().write(|w| w.pllon().set_bit());
-
     while ! dp.RCC.cr().read().pllrdy().bit() {}
 
     // FLASH_LATENCY_2
@@ -115,8 +114,8 @@ fn main() -> ! {
 
     let mut cp = cortex_m::Peripherals::take().unwrap();
     unsafe {
-        cp.SYST.rvr.write(8400000);
-        cp.SYST.cvr.write(8400000);
+        cp.SYST.rvr.write(8_400_000);
+        cp.SYST.cvr.write(8_400_000);
         cp.SYST.csr.write(0x0105)
     };
 
