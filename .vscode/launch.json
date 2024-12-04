@@ -14,7 +14,7 @@
             "servertype": "openocd",
             "configFiles": ["openocd.cfg"],
             "preLaunchTask": "Build binary",
-            "showDevDebugOutput": "raw",
+            "showDevDebugOutput": "none",
             "preLaunchCommands": [
                 "monitor init",
                 "monitor reset init",

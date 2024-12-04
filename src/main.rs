@@ -2,19 +2,18 @@
 #![no_main]
 
 // you can put a breakpoint on `rust_begin_unwind` to catch panics
-                     // use panic_abort as _; // requires nightly
-                     // use panic_itm as _; // logs messages over ITM; requires ITM support
-                     // use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
+// use panic_abort as _; // requires nightly
+// use panic_itm as _; // logs messages over ITM; requires ITM support
+// use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
 
 mod ringbuffer;
-mod serial;
 mod support;
+mod serial;
 
 use cortex_m_rt::entry;
-
 use stm32f401_pac as pac;
 use crate::ringbuffer::RingBuffer;
-use crate::serial::{Config, Serial};
+use crate::serial::{Serial};
 
 fn systemclock_config(dp: &pac::Peripherals) {
     // SystemClock_Config
@@ -118,6 +117,28 @@ fn config_gpio(dp: &pac::Peripherals) {
     dp.RCC
         .ahb1enr()
         .write(|w| w.gpioaen().set_bit().gpiocen().set_bit());
+
+    // Configure pa2 and pa3 for USART2
+    dp.GPIOA
+        .moder()
+        .write(|w| unsafe { w.moder2().bits(0b10).moder3().bits(0b10) });
+    
+    dp.GPIOA
+        .otyper()
+        .write(|w| w.ot2().clear_bit().ot3().clear_bit());
+    
+    dp.GPIOA
+        .ospeedr()
+        .write(|w| unsafe { w.ospeedr2().bits(0b10).ospeedr3().bits(0b10) });
+    
+    dp.GPIOA
+        .pupdr()
+        .write(|w| unsafe { w.pupdr2().bits(0b00).pupdr3().bits(0b00) });
+    
+    dp.GPIOA
+        .afrl()
+        .write(|w| unsafe { w.afrl2().bits(0b0111).afrl3().bits(0b0111) });
+    
 }
 
 #[panic_handler]
@@ -133,8 +154,8 @@ fn main() -> ! {
     systemclock_config(&dp);
 
     config_gpio(&dp);
-
-    config_usart2(&dp);
+    
+    // dbg!("Running..");
 
     let mut cp = cortex_m::Peripherals::take().unwrap();
     unsafe {
@@ -147,29 +168,22 @@ fn main() -> ! {
         .moder()
         .modify(|_, w| unsafe { w.moder5().bits(0b01) });
 
-    let usart2_config = crate::serial::Config {
+    let usart2_config = serial::Config {
         baudrate: 115_200,
     };
 
-    let usart2 = Serial::new(dp.USART2, usart2_config);
-
-    let mut buffer = RingBuffer::new();
+    let mut usart2 = Serial::new(dp.USART2, usart2_config);
+    let mut buffer = [0; 128];
+    buffer[0] = 0x48;
     loop {
         if cp.SYST.has_wrapped() {
             dp.GPIOA.odr().modify(|r, w| w.odr5().bit(!r.odr5().bit()));
-
-            dp.USART2.cr1().modify(|_, w| w.re().clear_bit().te().set_bit());
-            while let Ok(v) = buffer.read() {
-                dp.USART2.dr().write(|w| unsafe { w.bits(v as u32) });
-                while dp.USART2.sr().read().txe().bit_is_clear() {}
-            }
-            while dp.USART2.sr().read().tc().bit_is_clear() {}
-            dp.USART2.cr1().modify(|_, w| w.re().set_bit().te().clear_bit());
+            let _ = usart2.write(buffer, 1);
         }
-
-        if dp.USART2.sr().read().rxne().bit_is_set() {
-            let _ = buffer.write(dp.USART2.dr().read().bits() as u8);
-        }
+        // 
+        // if dp.USART2.sr().read().rxne().bit_is_set() {
+        //     let _ = buffer.write(dp.USART2.dr().read().bits() as u8);
+        // }
     }
 }
 
