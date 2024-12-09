@@ -10,10 +10,12 @@ mod ringbuffer;
 mod support;
 mod serial;
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use cortex_m_rt::interrupt;
 use cortex_m_rt::entry;
 use stm32f401_pac as pac;
-use crate::ringbuffer::RingBuffer;
-use crate::serial::{Serial};
+use crate::serial::Serial;
 
 fn systemclock_config(dp: &pac::Peripherals) {
     // SystemClock_Config
@@ -146,6 +148,11 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
+fn EXTI15_10() -> () {
+    static SYSTICK_CNT: AtomicU32 = AtomicU32::new(0);
+    SYSTICK_CNT.fetch_add(1, Ordering::AcqRel);
+}
+
 #[entry]
 fn main() -> ! {
     // Setup handler for device peripherals
@@ -178,12 +185,11 @@ fn main() -> ! {
     loop {
         if cp.SYST.has_wrapped() {
             dp.GPIOA.odr().modify(|r, w| w.odr5().bit(!r.odr5().bit()));
-            let _ = usart2.write(buffer, 1);
         }
-        // 
-        // if dp.USART2.sr().read().rxne().bit_is_set() {
-        //     let _ = buffer.write(dp.USART2.dr().read().bits() as u8);
-        // }
+
+        if let Ok(n) = usart2.read(&mut buffer) {
+            let _ = usart2.write(&buffer[0..n]);
+        }
     }
 }
 
