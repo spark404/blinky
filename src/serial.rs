@@ -1,6 +1,9 @@
-use crate::support::{Ptr};
-use stm32f401_pac as pac;
+use crate::{get_systick, HSI_FREQ};
 use crate::pac::usart1::RegisterBlock as RegisterBlockUsart;
+use crate::support::Ptr;
+use semihosting::dbg;
+use stm32f401_pac as pac;
+use stm32f401_pac::RCC;
 
 pub struct Config {
     pub baudrate: u32,
@@ -10,10 +13,7 @@ pub struct Serial<USART> {
 }
 
 pub trait RegisterBlockImpl {
-    fn new<USART: Instance + Ptr<RB = Self>>(
-        uart: USART,
-        config: Config,
-    ) -> Serial<USART>;
+    fn new<USART: Instance + Ptr<RB = Self>>(uart: USART, config: Config) -> Serial<USART>;
     fn write(&self, byte: u8) -> Result<(), &str>;
     fn read(&self) -> Result<u8, &str>;
     fn set_transmit_enable(&self, enable: bool);
@@ -21,22 +21,17 @@ pub trait RegisterBlockImpl {
     fn transmit_complete(&self) -> bool;
 }
 
-pub trait Instance:
-    Ptr<RB: RegisterBlockImpl> + core::ops::Deref<Target = Self::RB>
-{
-}
+pub trait Instance: Ptr<RB: RegisterBlockImpl> + core::ops::Deref<Target = Self::RB> {}
 
 impl RegisterBlockImpl for RegisterBlockUsart {
-    fn new<USART: Instance + Ptr<RB = Self>>(
-        uart: USART,
-        config: Config,
-    ) -> Serial<USART> {
+    fn new<USART: Instance + Ptr<RB = Self>>(uart: USART, config: Config) -> Serial<USART> {
         // Init the clock
         unsafe {
-            let rcc = &*pac::Rcc::ptr();
+            // FIXME Usart specific
+            let rcc = &*pac::RCC::ptr();
             rcc.apb1enr().modify(|_, w| w.usart2en().set_bit());
         }
-        
+
         // Disable USART2
         uart.cr1().write(|w| w.ue().clear_bit());
 
@@ -61,7 +56,7 @@ impl RegisterBlockImpl for RegisterBlockUsart {
             .modify(|_, w| w.rtse().clear_bit().ctse().clear_bit());
 
         // Determine BRR from PCLK1 frq (84Mhz DIV/2) and baudrate
-        let brr = baud_to_brr(84_000_000 / 2, config.baudrate);
+        let brr = baud_to_brr(HSI_FREQ as u64 / 2, config.baudrate);
         uart.brr().write(|w| unsafe { w.bits(brr) });
 
         // Clear CR2 LINEN, CLKEN
@@ -77,38 +72,40 @@ impl RegisterBlockImpl for RegisterBlockUsart {
 
         Serial { uart }
     }
-    
+
     fn write(&self, byte: u8) -> Result<(), &str> {
         self.dr().write(|w| unsafe { w.bits(byte as u32) });
-        while self.sr().read().txe().bit_is_clear() {};
+        while self.sr().read().txe().bit_is_clear() {}
         Ok(())
     }
-    
+
     fn read(&self) -> Result<u8, &str> {
+        let start = get_systick();
         loop {
             let sr = self.sr().read();
-            
-            if sr.fe().bit_is_set() || 
-                sr.ore().bit_is_set() ||
-                sr.nf().bit_is_set() ||
-                sr.idle().bit_is_set() {
+
+            if sr.fe().bit_is_set() || sr.ore().bit_is_set() || sr.nf().bit_is_set() {
                 // Clear the register
                 _ = self.dr().read().bits();
-                return Err("read error")
+                return Err("read error");
+            }
+
+            if get_systick() - start > 100 {
+                return Err("Timeout");
             }
 
             if sr.rxne().bit_is_set() {
                 break;
             }
         }
-        
+
         Ok(self.dr().read().bits() as u8)
     }
-    
+
     fn set_transmit_enable(&self, enable: bool) {
-        self.cr1().modify(|_, w|  w.te().bit(enable));
+        self.cr1().modify(|_, w| w.te().bit(enable));
     }
-    
+
     fn set_receive_enable(&self, enable: bool) {
         self.cr1().modify(|_, w| w.re().bit(enable));
     }
@@ -119,11 +116,11 @@ impl RegisterBlockImpl for RegisterBlockUsart {
 }
 
 impl<USART: Instance> Serial<USART> {
-    pub fn new(usart: USART, config: Config) -> Self {
+    pub fn new(usart: USART, rcc: &RCC, config: Config) -> Self {
         <USART as Ptr>::RB::new(usart, config)
     }
-    
-    pub fn write(&mut self, buffer: &[u8]) -> Result<(), &str>{
+
+    pub fn write(&mut self, buffer: &[u8]) -> Result<(), &str> {
         self.uart.set_receive_enable(false);
         self.uart.set_transmit_enable(true);
 
@@ -135,16 +132,21 @@ impl<USART: Instance> Serial<USART> {
 
         self.uart.set_transmit_enable(false);
         self.uart.set_receive_enable(true);
-        
+
         Ok(())
     }
-    
+
     pub fn read(&mut self, buffer: &mut [u8]) -> Result<usize, &str> {
         let mut count = 0;
         for b in buffer {
-            if let Ok(c) = self.uart.read() {
-                *b = c;
-                count = count + 1;
+            match self.uart.read() {
+                Ok(c) => {
+                    *b = c;
+                    count += 1;
+                }
+                Err(e) => {
+                    break;
+                }
             }
         }
         Ok(count)
@@ -152,21 +154,21 @@ impl<USART: Instance> Serial<USART> {
 }
 
 macro_rules! serial_instance {
-    ($USART:ty) => { 
+    ($USART:ty) => {
         impl Ptr for $USART {
             type RB = RegisterBlockUsart;
             fn ptr() -> *const Self::RB {
                 Self::ptr()
             }
         }
-    
-    impl Instance for $USART {}
+
+        impl Instance for $USART {}
     };
 }
 
-serial_instance!(pac::Usart1);
-serial_instance!(pac::Usart2);
-serial_instance!(pac::Usart6);
+serial_instance!(pac::USART1);
+serial_instance!(pac::USART2);
+serial_instance!(pac::USART6);
 
 fn baud_to_brr(fclk: u64, baudrate: u32) -> u32 {
     let div16 = (fclk * 25) / (4 * baudrate) as u64;

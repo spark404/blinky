@@ -7,15 +7,28 @@
 // use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
 
 mod ringbuffer;
-mod support;
 mod serial;
+mod support;
 
-use core::sync::atomic::{AtomicU32, Ordering};
-
-use cortex_m_rt::interrupt;
+use crate::serial::Serial;
 use cortex_m_rt::entry;
 use stm32f401_pac as pac;
-use crate::serial::Serial;
+
+static mut SYSTICK_CNT: u32 = 0;
+static HSI_FREQ: u32 = 84_000_000;
+
+fn get_systick() -> u32 {
+    // Safety: Safe because this is runnning on a single core 32 bit MCU without threading.
+    // Making this call atomic
+    unsafe { SYSTICK_CNT }
+}
+
+fn inc_systic() {
+    // Safety: Safe because this is runnning on a single core 32 bit MCU without threading.
+    unsafe {
+        SYSTICK_CNT += 1;
+    }
+}
 
 fn systemclock_config(dp: &pac::Peripherals) {
     // SystemClock_Config
@@ -124,23 +137,22 @@ fn config_gpio(dp: &pac::Peripherals) {
     dp.GPIOA
         .moder()
         .write(|w| unsafe { w.moder2().bits(0b10).moder3().bits(0b10) });
-    
+
     dp.GPIOA
         .otyper()
         .write(|w| w.ot2().clear_bit().ot3().clear_bit());
-    
+
     dp.GPIOA
         .ospeedr()
         .write(|w| unsafe { w.ospeedr2().bits(0b10).ospeedr3().bits(0b10) });
-    
+
     dp.GPIOA
         .pupdr()
         .write(|w| unsafe { w.pupdr2().bits(0b00).pupdr3().bits(0b00) });
-    
+
     dp.GPIOA
         .afrl()
         .write(|w| unsafe { w.afrl2().bits(0b0111).afrl3().bits(0b0111) });
-    
 }
 
 #[panic_handler]
@@ -148,9 +160,15 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-fn EXTI15_10() -> () {
-    static SYSTICK_CNT: AtomicU32 = AtomicU32::new(0);
-    SYSTICK_CNT.fetch_add(1, Ordering::AcqRel);
+#[doc(hidden)]
+#[export_name = "SysTick"]
+pub unsafe extern "C" fn sys_tick_trampoline() {
+    #[allow(static_mut_refs)]
+    sys_tick_handler()
+}
+
+fn sys_tick_handler() {
+    inc_systic();
 }
 
 #[entry]
@@ -161,35 +179,29 @@ fn main() -> ! {
     systemclock_config(&dp);
 
     config_gpio(&dp);
-    
-    // dbg!("Running..");
 
     let mut cp = cortex_m::Peripherals::take().unwrap();
     unsafe {
-        cp.SYST.rvr.write(8_400_000);
-        cp.SYST.cvr.write(8_400_000);
-        cp.SYST.csr.write(0x0105)
+        cp.SYST.rvr.write((HSI_FREQ / 1000) - 1);
+        cp.SYST.cvr.write(0);
+        cp.SYST.csr.write(0x0107)
     };
 
     dp.GPIOA
         .moder()
         .modify(|_, w| unsafe { w.moder5().bits(0b01) });
 
-    let usart2_config = serial::Config {
-        baudrate: 115_200,
-    };
+    let usart2_config = serial::Config { baudrate: 115_200 };
 
-    let mut usart2 = Serial::new(dp.USART2, usart2_config);
+    let mut usart2 = Serial::new(dp.USART2, &dp.RCC, usart2_config);
     let mut buffer = [0; 128];
     buffer[0] = 0x48;
+    
     loop {
-        if cp.SYST.has_wrapped() {
-            dp.GPIOA.odr().modify(|r, w| w.odr5().bit(!r.odr5().bit()));
-        }
-
+        
         if let Ok(n) = usart2.read(&mut buffer) {
             let _ = usart2.write(&buffer[0..n]);
         }
+        dp.GPIOA.odr().modify(|r, w| w.odr5().bit(!r.odr5().bit()));
     }
 }
-
